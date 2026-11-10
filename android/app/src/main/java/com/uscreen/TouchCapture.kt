@@ -24,6 +24,7 @@ class TouchCapture {
 
     private var webSocket: WebSocket? = null
     @Volatile private var isConnected = false
+    @Volatile private var reconnectEnabled = true
     private var reconnectJob: Job? = null
     private var surfaceView: SurfaceView? = null
 
@@ -132,14 +133,20 @@ class TouchCapture {
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            isConnected = false
-            scheduleReconnect()
+            synchronized(this@TouchCapture) {
+                if (this@TouchCapture.webSocket !== webSocket) return
+                isConnected = false
+                if (reconnectEnabled) scheduleReconnect()
+            }
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            isConnected = false
-            Log.w(TAG, "Connection failed: ${t.message}")
-            scheduleReconnect()
+            synchronized(this@TouchCapture) {
+                if (this@TouchCapture.webSocket !== webSocket) return
+                isConnected = false
+                Log.w(TAG, "Connection failed: ${t.message}")
+                if (reconnectEnabled) scheduleReconnect()
+            }
         }
     }
 
@@ -177,6 +184,9 @@ class TouchCapture {
     }
 
     fun connect() {
+        synchronized(this) {
+            reconnectEnabled = true
+        }
         penButtonDown = false
         // Idempotent: a second connect() must not leave the first socket
         // alive with its listener still flipping isConnected. onStart and a
@@ -199,11 +209,14 @@ class TouchCapture {
     }
 
     private fun scheduleReconnect() {
+        if (!reconnectEnabled) return
         reconnectJob?.cancel()
         reconnectJob = scope.launch {
             delay(RECONNECT_DELAY_MS)
-            if (!isConnected) {
-                connectWebSocket()
+            synchronized(this@TouchCapture) {
+                if (reconnectEnabled && !isConnected) {
+                    connectWebSocket()
+                }
             }
         }
     }
@@ -724,9 +737,14 @@ class TouchCapture {
     fun isControlConnected(): Boolean = isConnected
 
     fun disconnect() {
-        reconnectJob?.cancel()
-        webSocket?.close(1000, "Client closing")
-        webSocket = null
-        isConnected = false
+        synchronized(this) {
+            reconnectEnabled = false
+            reconnectJob?.cancel()
+            reconnectJob = null
+            val socket = webSocket
+            webSocket = null
+            isConnected = false
+            socket?.close(1000, "Client closing")
+        }
     }
 }

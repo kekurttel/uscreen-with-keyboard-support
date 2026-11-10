@@ -461,11 +461,15 @@ fun UScreenMain(
 
     LaunchedEffect(keyboardVisible) {
         if (keyboardVisible) {
+            // The AndroidView is attached after this composition. Post the show
+            // request so the IME sees an attached, focused editor.
             withFrameNanos { }
             keyboardInput?.let { input ->
-                input.requestFocus()
-                (context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
-                    .showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)
+                input.post {
+                    input.requestFocus()
+                    (context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+                        .showSoftInput(input, InputMethodManager.SHOW_FORCED)
+                }
             }
         }
     }
@@ -588,7 +592,14 @@ fun UScreenMain(
                 }
                 if (keyboardForwarding) {
                     IconButton(
-                        onClick = { keyboardVisible = !keyboardVisible },
+                        onClick = {
+                            val input = keyboardInput
+                            if (keyboardVisible && input != null) {
+                                (context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+                                    .hideSoftInputFromWindow(input.windowToken, 0)
+                            }
+                            keyboardVisible = !keyboardVisible
+                        },
                         modifier = Modifier.size(36.dp).background(Color(0x6620202C), CircleShape)
                     ) {
                         Text("⌨", color = Color(0xFFB0B0C0), fontSize = 18.sp)
