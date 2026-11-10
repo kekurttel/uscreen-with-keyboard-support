@@ -539,6 +539,10 @@ class TouchCapture {
         webSocket?.send(msg.toString())
     }
 
+    fun sendKey(code: Int, action: Int, meta: Int) {
+        webSocket?.send("{\"type\":\"key\",\"code\":" + code + ",\"action\":" + action + ",\"meta\":" + meta + "}")
+    }
+
     private fun sendTouch(x: Float, y: Float, pressure: Double,
                           action: Int, slot: Int) {
         val msg = JSONObject().apply {

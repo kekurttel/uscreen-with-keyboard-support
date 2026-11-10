@@ -51,7 +51,9 @@ before the Annex B data.
 **Input (WebSocket, loopback, port 8891 + 2·slot).** JSON messages. The first
 must be `{"type":"auth","token":"…"}`; the server then replies with a greeting
 `{"status":"connected","width":…,"height":…,"codec":"h264"|"hevc","pen_only":bool}`
-and repeats it whenever the mode changes. Client messages:
+and repeats it whenever the mode changes. The greeting may include
+`"keyboard":true` to indicate keyboard forwarding support; older clients can
+ignore this optional field and continue using the existing protocol. Client messages:
 
 ```json
 {"type":"touch","x":0.5,"y":0.3,"pressure":1.0,"action":0,"slot":0}
@@ -60,11 +62,10 @@ and repeats it whenever the mode changes. Client messages:
 {"type":"config","bitrate":20000,"fps":60}
 {"type":"mode","pen_only":true}
 {"type":"rendered","seq":1234,"decode_us":14200}
+{"type":"key","code":29,"action":0,"meta":0}
 ```
 
-Coordinates are normalised 0–1; tilt is in degrees; touch actions are
-0 down, 1 up, 2 move; pen actions add 3 hover, 4 hover exit, 5/6 stylus
-button down/up.
+Keyboard messages use `{"type":"key","code":<Android KeyEvent keyCode>,"action":0|1,"meta":<metaState>}`; action 0 is key down and 1 is key up. `code` is an explicit Android `KeyEvent` keyCode and `meta` is its Android meta-state bitfield. Coordinates are normalised 0–1; tilt is in degrees; touch actions are 0 down, 1 up, 2 move; pen actions add 3 hover, 4 hover exit, 5/6 stylus button down/up.
 
 ## Security model
 

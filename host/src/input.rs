@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
-use tokio_tungstenite::{accept_async_with_config, tungstenite::protocol::WebSocketConfig};
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{accept_async_with_config, tungstenite::protocol::WebSocketConfig};
 use tracing::{error, info, warn};
 
 // Linux input event constants
@@ -78,7 +78,9 @@ const PRODUCT_TOUCH: u16 = 0x0001;
 const PRODUCT_PEN: u16 = 0x0002;
 const PRODUCT_POINTER: u16 = 0x0003;
 const PRODUCT_TOUCHPAD: u16 = 0x0004;
+const PRODUCT_KEYBOARD: u16 = 0x0005;
 const TOUCH_DEVICE_NAME: &str = "UScreen Touch";
+const KEYBOARD_DEVICE_NAME: &str = "UScreen Keyboard";
 const PEN_DEVICE_NAME: &str = "UScreen Pen";
 const POINTER_DEVICE_NAME: &str = "UScreen Pointer";
 const TOUCHPAD_DEVICE_NAME: &str = "UScreen Touchpad";
@@ -93,27 +95,35 @@ pub struct DeviceIdentity {
     pub pen: String,
     pub pointer: String,
     pub touchpad: String,
+    pub keyboard: String,
     pub product_touch: u16,
     pub product_pen: u16,
     pub product_pointer: u16,
     pub product_touchpad: u16,
+    pub product_keyboard: u16,
     /// How many of the three devices exist: 2 when pointer_handoff is off.
     pub device_count: usize,
 }
 
 impl DeviceIdentity {
     pub fn for_instance(instance: u32) -> Self {
-        let suffix = if instance == 0 { String::new() } else { format!(" {}", instance + 1) };
+        let suffix = if instance == 0 {
+            String::new()
+        } else {
+            format!(" {}", instance + 1)
+        };
         let base = (instance as u16) * 16;
         Self {
             touch: format!("{}{}", TOUCH_DEVICE_NAME, suffix),
             pen: format!("{}{}", PEN_DEVICE_NAME, suffix),
             pointer: format!("{}{}", POINTER_DEVICE_NAME, suffix),
             touchpad: format!("{}{}", TOUCHPAD_DEVICE_NAME, suffix),
+            keyboard: format!("{}{}", KEYBOARD_DEVICE_NAME, suffix),
             product_touch: PRODUCT_TOUCH + base,
             product_pen: PRODUCT_PEN + base,
             product_pointer: PRODUCT_POINTER + base,
             product_touchpad: PRODUCT_TOUCHPAD + base,
+            product_keyboard: PRODUCT_KEYBOARD + base,
             device_count: 3,
         }
     }
@@ -225,6 +235,14 @@ pub enum InputEvent {
     /// The tablet has this frame on screen. Closes the latency measurement
     /// loop — the host timed the frame out, so the round trip needs no clock
     /// agreement between the two devices.
+    /// Android KeyEvent code and action (0 down, 1 up); meta carries Android modifier bits.
+    #[serde(rename = "key")]
+    Key {
+        code: u16,
+        action: u8,
+        #[serde(default)]
+        meta: u32,
+    },
     #[serde(rename = "rendered")]
     Rendered {
         seq: u32,
@@ -248,6 +266,9 @@ pub struct InputResponse {
     /// Tells the tablet not to expect a video stream: it is acting as a
     /// graphics tablet for the host's own screen, not as a display.
     pub pen_only: bool,
+    /// Client supports physical-keyboard forwarding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keyboard: Option<bool>,
     /// The computer's current stream settings. The tablet shows these and
     /// sends settings back only when the user presses Apply; until it knew
     /// them it re-sent its own remembered copy on every connect, which
@@ -349,6 +370,23 @@ impl UInputDevice {
         Ok(Self { file })
     }
 
+    /// Keyboard device: advertises the complete Linux KEY_* bitmap so desktops
+    /// recognise it as a standard keyboard, while injection remains unmapped to outputs.
+    fn new_keyboard(name: &str, product: u16) -> Result<Self> {
+        let file = Self::open_uinput()?;
+        let fd = file.as_raw_fd();
+        unsafe {
+            Self::ioctl_val(fd, UI_SET_EVBIT, EV_SYN as i32)?;
+            Self::ioctl_val(fd, UI_SET_EVBIT, EV_KEY as i32)?;
+            for code in 0..=0x2ff {
+                Self::ioctl_val(fd, UI_SET_KEYBIT, code)?;
+            }
+            Self::dev_setup_and_create(fd, name, product)?;
+        }
+        info!("uinput keyboard '{}' created", name);
+        Ok(Self { file })
+    }
+
     /// Pen tablet device: stylus tool + pressure + tilt.
     /// No INPUT_PROP_DIRECT — that flag means "touchscreen" and causes KDE to
     /// activate the on-screen keyboard on every pen tap. Without it, libinput
@@ -431,7 +469,14 @@ impl UInputDevice {
             for b in [BTN_LEFT, BTN_RIGHT, BTN_MIDDLE] {
                 Self::ioctl_val(fd, UI_SET_KEYBIT, b as i32)?;
             }
-            for r in [REL_X, REL_Y, REL_WHEEL, REL_HWHEEL, REL_WHEEL_HI_RES, REL_HWHEEL_HI_RES] {
+            for r in [
+                REL_X,
+                REL_Y,
+                REL_WHEEL,
+                REL_HWHEEL,
+                REL_WHEEL_HI_RES,
+                REL_HWHEEL_HI_RES,
+            ] {
                 Self::ioctl_val(fd, UI_SET_RELBIT, r as i32)?;
             }
             Self::dev_setup_and_create(fd, name, product)?;
@@ -446,8 +491,12 @@ impl UInputDevice {
         if dx == 0 && dy == 0 {
             return Ok(());
         }
-        if dx != 0 { self.emit(EV_REL, REL_X, dx)?; }
-        if dy != 0 { self.emit(EV_REL, REL_Y, dy)?; }
+        if dx != 0 {
+            self.emit(EV_REL, REL_X, dx)?;
+        }
+        if dy != 0 {
+            self.emit(EV_REL, REL_Y, dy)?;
+        }
         self.syn()
     }
 
@@ -625,7 +674,11 @@ impl UInputDevice {
     ) -> Result<()> {
         // The active tablet-tool key depends on which end of the pen is in
         // use. An S Pen flipped to its eraser end reports TOOL_TYPE_ERASER.
-        let tool = if eraser { BTN_TOOL_RUBBER } else { BTN_TOOL_PEN };
+        let tool = if eraser {
+            BTN_TOOL_RUBBER
+        } else {
+            BTN_TOOL_PEN
+        };
         // A pen that is touching reports some pressure. A very light tap can
         // arrive from the tablet as exactly 0 (a Xiaomi Focus Pen Pro does),
         // which says "touching" with BTN_TOUCH and "not touching" with the
@@ -730,6 +783,10 @@ impl Drop for UInputDevice {
 /// The pair of virtual input devices backing one tablet connection.
 struct InjectDevices {
     touch: Option<UInputDevice>,
+    keyboard: Option<UInputDevice>,
+    /// Linux keycodes currently held, released on client disconnect.
+    pressed_keys: std::collections::HashSet<u16>,
+    unmapped_keys: std::collections::HashSet<u16>,
     pen: Option<UInputDevice>,
     /// Takes over the cursor when the pen leaves proximity, so it stays where
     /// the user last pointed instead of vanishing.
@@ -784,6 +841,13 @@ impl InjectDevices {
             }
         }
         self.active_slots = 0;
+
+        if let Some(ref mut dev) = self.keyboard {
+            for code in self.pressed_keys.drain() {
+                let _ = dev.emit(EV_KEY, code, 0);
+            }
+            let _ = dev.syn();
+        }
 
         if self.pen_proximity {
             if let Some(ref mut dev) = self.pen {
@@ -904,7 +968,11 @@ async fn kwin_device_property(sysname: &str, property: &str) -> Option<String> {
 /// and finding it empty, both when written before and after device creation.
 /// Setting the property directly takes effect immediately, and KWin persists it
 /// itself.
-async fn map_devices_to_output(pen_only: bool, ident: &DeviceIdentity, card: Option<u32>) -> Option<String> {
+async fn map_devices_to_output(
+    pen_only: bool,
+    ident: &DeviceIdentity,
+    card: Option<u32>,
+) -> Option<String> {
     if crate::hyprland::active() {
         return map_devices_on_hyprland(pen_only, ident, card).await;
     }
@@ -948,8 +1016,7 @@ async fn map_devices_to_output(pen_only: bool, ident: &DeviceIdentity, card: Opt
             let Some(name) = kwin_device_property(&sysname, "name").await else {
                 continue;
             };
-            if !ident.owns(&name)
-            {
+            if !ident.owns(&name) {
                 continue;
             }
             let ok = crate::kwin::set_property(
@@ -979,7 +1046,10 @@ async fn map_devices_to_output(pen_only: bool, ident: &DeviceIdentity, card: Opt
                         ),
                     }
                 }
-                false => warn!("Could not map '{}': KWin refused the outputName property", name),
+                false => warn!(
+                    "Could not map '{}': KWin refused the outputName property",
+                    name
+                ),
             }
         }
 
@@ -1073,9 +1143,18 @@ async fn map_devices_on_x11(
         warn!("X11 has no output to map onto — touch and pen will address the whole desktop");
         return None;
     };
-    if std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_uppercase().contains("CINNAMON")
-        && !crate::gnome::map_cinnamon_devices(UINPUT_VENDOR, ident.product_touch, ident.product_pen,
-            (!pen_only).then_some(output.as_str())).await {
+    if std::env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .to_uppercase()
+        .contains("CINNAMON")
+        && !crate::gnome::map_cinnamon_devices(
+            UINPUT_VENDOR,
+            ident.product_touch,
+            ident.product_pen,
+            (!pen_only).then_some(output.as_str()),
+        )
+        .await
+    {
         warn!("Cinnamon did not accept its native input mapping; using XInput mapping");
     }
     let mut names = vec![ident.touch.as_str(), ident.pen.as_str()];
@@ -1116,7 +1195,10 @@ async fn map_and_note_area(
     if let Some((x, y, w, h)) = area {
         info!(
             "Pointer area on the desktop: {:.0}%,{:.0}% + {:.0}%x{:.0}%",
-            x * 100.0, y * 100.0, w * 100.0, h * 100.0
+            x * 100.0,
+            y * 100.0,
+            w * 100.0,
+            h * 100.0
         );
     }
 }
@@ -1128,9 +1210,17 @@ async fn map_and_note_area(
 async fn output_area_on_desktop(output: &str) -> Option<(f64, f64, f64, f64)> {
     let outputs = kscreen_outputs().await?;
     let logical = |o: &serde_json::Value| -> Option<(f64, f64, f64, f64)> {
-        let scale = o.get("scale").and_then(|v| v.as_f64()).unwrap_or(1.0).max(0.01);
+        let scale = o
+            .get("scale")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.0)
+            .max(0.01);
         let id = o.get("currentModeId")?.as_str()?;
-        let mode = o.get("modes")?.as_array()?.iter().find(|m| m.get("id").and_then(|v| v.as_str()) == Some(id))?;
+        let mode = o
+            .get("modes")?
+            .as_array()?
+            .iter()
+            .find(|m| m.get("id").and_then(|v| v.as_str()) == Some(id))?;
         let w = mode.pointer("/size/width")?.as_f64()? / scale;
         let h = mode.pointer("/size/height")?.as_f64()? / scale;
         let x = o.pointer("/pos/x")?.as_f64()?;
@@ -1143,7 +1233,9 @@ async fn output_area_on_desktop(output: &str) -> Option<(f64, f64, f64, f64)> {
         if !o.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false) {
             continue;
         }
-        let Some((x, y, w, h)) = logical(o) else { continue };
+        let Some((x, y, w, h)) = logical(o) else {
+            continue;
+        };
         max_x = max_x.max(x + w);
         max_y = max_y.max(y + h);
         if o.get("name").and_then(|v| v.as_str()) == Some(output) {
@@ -1210,8 +1302,7 @@ async fn target_output(
                 .collect();
             let enabled = outputs.iter().find(|o| {
                 let name = o.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                mine.contains(&name)
-                    && o.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false)
+                mine.contains(&name) && o.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false)
             });
             if let Some(o) = enabled {
                 return o.get("name").and_then(|v| v.as_str()).map(str::to_string);
@@ -1313,6 +1404,17 @@ impl InputServer {
                     None
                 }
             };
+            let keyboard =
+                match UInputDevice::new_keyboard(&ident_bg.keyboard, ident_bg.product_keyboard) {
+                    Ok(dev) => Some(dev),
+                    Err(e) => {
+                        warn!(
+                            "No keyboard device: {}. Keyboard forwarding unavailable.",
+                            e
+                        );
+                        None
+                    }
+                };
             let pointer = if !pointer_handoff {
                 info!("pointer_handoff is off — the pen will not move the desktop cursor");
                 None
@@ -1320,13 +1422,19 @@ impl InputServer {
                 match UInputDevice::new_pointer(&ident_bg.pointer, ident_bg.product_pointer) {
                     Ok(dev) => Some(dev),
                     Err(e) => {
-                        warn!("No pointer device: {}. The cursor will vanish when the pen lifts.", e);
+                        warn!(
+                            "No pointer device: {}. The cursor will vanish when the pen lifts.",
+                            e
+                        );
                         None
                     }
                 }
             };
             InjectDevices {
                 touch,
+                keyboard,
+                pressed_keys: std::collections::HashSet::new(),
+                unmapped_keys: std::collections::HashSet::new(),
                 pen,
                 pointer,
                 mouse: None,
@@ -1345,6 +1453,9 @@ impl InputServer {
         .await
         .unwrap_or(InjectDevices {
             touch: None,
+            keyboard: None,
+            pressed_keys: std::collections::HashSet::new(),
+            unmapped_keys: std::collections::HashSet::new(),
             pen: None,
             pointer: None,
             mouse: None,
@@ -1400,7 +1511,11 @@ impl InputServer {
                     // a mode change during the wait simply restarts it.
                     info!(
                         "Mode is now {} — remapping input devices{}",
-                        if pen_only { "pen-only" } else { "second screen" },
+                        if pen_only {
+                            "pen-only"
+                        } else {
+                            "second screen"
+                        },
                         card.map(|c| format!(" (card{})", c)).unwrap_or_default()
                     );
                     map_and_note_area(pen_only, &ident_map, card, &devices).await;
@@ -1492,7 +1607,8 @@ async fn handle_connection(
 
     // Authenticate before anything else happens: no greeting, no events.
     if let Some(expected) = config.token.as_deref() {
-        let first = tokio::time::timeout(std::time::Duration::from_secs(3), ws_receiver.next()).await;
+        let first =
+            tokio::time::timeout(std::time::Duration::from_secs(3), ws_receiver.next()).await;
         let ok = match first {
             Ok(Some(Ok(Message::Text(text)))) => matches!(
                 serde_json::from_str::<InputEvent>(&text),
@@ -1506,7 +1622,9 @@ async fn handle_connection(
             static DROPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             let n = DROPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if n < 5 {
-                warn!("Input client did not authenticate — dropped. Re-sending the token to the app.");
+                warn!(
+                    "Input client did not authenticate — dropped. Re-sending the token to the app."
+                );
             } else if n == 5 {
                 warn!("Further unauthenticated clients will be dropped quietly.");
             }
@@ -1524,6 +1642,7 @@ async fn handle_connection(
         height: config.virtual_height,
         codec: config.codec.clone(),
         pen_only: *mode_rx.borrow_and_update(),
+        keyboard: Some(true),
         fps: last_sent.map(|(f, _)| f),
         bitrate_kbps: last_sent.map(|(_, b)| b),
     };
@@ -1553,6 +1672,7 @@ async fn handle_connection(
                     height: config.virtual_height,
                     codec: config.codec.clone(),
                     pen_only,
+                    keyboard: Some(true),
                     fps: now.map(|(f, _)| f),
                     bitrate_kbps: now.map(|(_, b)| b),
                 };
@@ -1591,6 +1711,7 @@ async fn handle_connection(
                     height: config.virtual_height,
                     codec: config.codec.clone(),
                     pen_only: *mode_rx.borrow(),
+                    keyboard: Some(true),
                     fps: now.map(|(f, _)| f),
                     bitrate_kbps: now.map(|(_, b)| b),
                 };
@@ -1639,11 +1760,96 @@ async fn handle_connection(
 static PEN_ACTIONS: std::sync::Mutex<[u32; 8]> = std::sync::Mutex::new([0; 8]);
 static PEN_LOG_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
 
+/// Translate Android KeyEvent keycodes to Linux input-event-codes explicitly.
+fn android_key_to_linux(code: u16) -> Option<u16> {
+    const DIGITS: [u16; 10] = [11, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    const LETTERS: [u16; 26] = [
+        30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50, 49, 24, 25, 16, 19, 31, 20, 22, 47, 17,
+        45, 21, 44,
+    ];
+    if (7..=16).contains(&code) {
+        return Some(DIGITS[(code - 7) as usize]);
+    }
+    if (29..=54).contains(&code) {
+        return Some(LETTERS[(code - 29) as usize]);
+    }
+    if (131..=140).contains(&code) {
+        return Some(59 + code - 131);
+    }
+    if code == 141 {
+        return Some(87);
+    }
+    if code == 142 {
+        return Some(88);
+    }
+    Some(match code {
+        19 => 103,
+        20 => 108,
+        21 => 105,
+        22 => 106,
+        55 => 51,
+        56 => 52,
+        57 => 56,
+        58 => 100,
+        59 => 42,
+        60 => 54,
+        61 => 15,
+        62 => 57,
+        66 => 28,
+        67 => 14,
+        68 => 41,
+        69 => 12,
+        70 => 13,
+        71 => 26,
+        72 => 27,
+        73 => 43,
+        74 => 39,
+        75 => 40,
+        76 => 53,
+        92 => 104,
+        93 => 109,
+        111 => 1,
+        112 => 111,
+        113 => 29,
+        114 => 97,
+        115 => 58,
+        116 => 70,
+        117 => 125,
+        118 => 126,
+        120 => 99,
+        121 => 119,
+        122 => 102,
+        123 => 107,
+        124 => 110,
+        143 => 69,
+        144 => 82,
+        145 => 79,
+        146 => 80,
+        147 => 81,
+        148 => 75,
+        149 => 76,
+        150 => 77,
+        151 => 71,
+        152 => 72,
+        153 => 73,
+        154 => 98,
+        155 => 55,
+        156 => 74,
+        157 => 78,
+        158 => 83,
+        160 => 96,
+        161 => 117,
+        _ => return None,
+    })
+}
+
 fn note_pen_action(action: u8) {
     if let Ok(mut c) = PEN_ACTIONS.lock() {
         c[(action as usize).min(7)] += 1;
     }
-    let Ok(mut last) = PEN_LOG_AT.lock() else { return };
+    let Ok(mut last) = PEN_LOG_AT.lock() else {
+        return;
+    };
     let now = std::time::Instant::now();
     match *last {
         Some(t) if t.elapsed().as_secs() < 3 => return,
@@ -1683,7 +1889,10 @@ fn handle_event(
                 let ok = if let Some(ref mut dev) = guard.touch {
                     match dev.inject_touch(abs_x, abs_y, abs_pressure, action, slot) {
                         Ok(_) => true,
-                        Err(e) => { warn!("Failed to inject touch: {}", e); false }
+                        Err(e) => {
+                            warn!("Failed to inject touch: {}", e);
+                            false
+                        }
                     }
                 } else {
                     match action {
@@ -1724,13 +1933,27 @@ fn handle_event(
 
             if let Ok(mut guard) = uinput.lock() {
                 let ok = if let Some(ref mut dev) = guard.pen {
-                    match dev.inject_pen(abs_x, abs_y, abs_pressure, tilt_x_deg, tilt_y_deg, action, eraser) {
+                    match dev.inject_pen(
+                        abs_x,
+                        abs_y,
+                        abs_pressure,
+                        tilt_x_deg,
+                        tilt_y_deg,
+                        action,
+                        eraser,
+                    ) {
                         Ok(_) => true,
-                        Err(e) => { warn!("Failed to inject pen: {}", e); false }
+                        Err(e) => {
+                            warn!("Failed to inject pen: {}", e);
+                            false
+                        }
                     }
                 } else {
                     match action {
-                        0 => info!("Pen DOWN at ({}, {}), eraser={}, tilt=({:.1},{:.1})", abs_x, abs_y, eraser, tilt_x, tilt_y),
+                        0 => info!(
+                            "Pen DOWN at ({}, {}), eraser={}, tilt=({:.1},{:.1})",
+                            abs_x, abs_y, eraser, tilt_x, tilt_y
+                        ),
                         1 => info!("Pen UP   at ({}, {})", abs_x, abs_y),
                         _ => {}
                     }
@@ -1795,12 +2018,15 @@ fn handle_event(
             let mut new = tx.borrow().clone();
             // Reject nonsense physical sizes rather than baking them into an
             // EDID: a bad DPI makes the desktop come up at a absurd scale.
-            let (mm_w, mm_h) = if (50..=1000).contains(&width_mm) && (50..=1000).contains(&height_mm)
-            {
-                (width_mm, height_mm)
-            } else {
-                (crate::edid::DEFAULT_WIDTH_MM, crate::edid::DEFAULT_HEIGHT_MM)
-            };
+            let (mm_w, mm_h) =
+                if (50..=1000).contains(&width_mm) && (50..=1000).contains(&height_mm) {
+                    (width_mm, height_mm)
+                } else {
+                    (
+                        crate::edid::DEFAULT_WIDTH_MM,
+                        crate::edid::DEFAULT_HEIGHT_MM,
+                    )
+                };
             if new.width != width
                 || new.height != height
                 || new.width_mm != mm_w
@@ -1860,6 +2086,35 @@ fn handle_event(
 
         // Already consumed by handle_connection; a second one is harmless.
         InputEvent::Auth { .. } => {}
+        InputEvent::Key { code, action, meta } => {
+            // Retain the Android modifier snapshot for diagnostics and validate the field.
+            let _modifier_state = meta;
+            if action > 1 {
+                return;
+            }
+            if let Some(linux_code) = android_key_to_linux(code) {
+                if let Ok(mut guard) = uinput.lock() {
+                    if let Some(ref mut dev) = guard.keyboard {
+                        let value = if action == 0 { 1 } else { 0 };
+                        if dev
+                            .emit(EV_KEY, linux_code, value)
+                            .and_then(|_| dev.syn())
+                            .is_ok()
+                        {
+                            if value == 1 {
+                                guard.pressed_keys.insert(linux_code);
+                            } else {
+                                guard.pressed_keys.remove(&linux_code);
+                            }
+                        }
+                    }
+                }
+            } else if let Ok(mut guard) = uinput.lock() {
+                if guard.unmapped_keys.insert(code) {
+                    warn!("Ignoring unmapped Android key code {}", code);
+                }
+            }
+        }
 
         InputEvent::Rel { dx, dy } => {
             if let Ok(mut guard) = uinput.lock() {
@@ -1878,10 +2133,18 @@ fn handle_event(
         }
         InputEvent::Button { button, down } => {
             if let Ok(mut guard) = uinput.lock() {
-                let bit = match button { 1 => 2u8, 2 => 4, _ => 1 };
+                let bit = match button {
+                    1 => 2u8,
+                    2 => 4,
+                    _ => 1,
+                };
                 if let Some(dev) = guard.mouse() {
                     if dev.press(button, down).is_ok() {
-                        if down { guard.mouse_buttons |= bit } else { guard.mouse_buttons &= !bit }
+                        if down {
+                            guard.mouse_buttons |= bit
+                        } else {
+                            guard.mouse_buttons &= !bit
+                        }
                     }
                 }
             }
@@ -1909,7 +2172,11 @@ fn handle_event(
             }
             info!(
                 "Tablet switched to {}",
-                if pen_only { "pen-only mode" } else { "second-screen mode" }
+                if pen_only {
+                    "pen-only mode"
+                } else {
+                    "second-screen mode"
+                }
             );
             let _ = mode_tx.send(pen_only);
         }
@@ -1939,8 +2206,31 @@ mod tests {
 
     fn device_over_file(name: &str) -> (UInputDevice, std::path::PathBuf) {
         let path = std::env::temp_dir().join(format!("uscreen-{}-{}", name, std::process::id()));
-        let file = OpenOptions::new().create(true).truncate(true).write(true).open(&path).unwrap();
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
         (UInputDevice { file }, path)
+    }
+
+    #[test]
+    fn android_key_mapping_covers_common_keyboard_keys() {
+        assert_eq!(android_key_to_linux(29), Some(30)); // A
+        assert_eq!(android_key_to_linux(54), Some(44)); // Z
+        assert_eq!(android_key_to_linux(7), Some(11)); // 0
+        assert_eq!(android_key_to_linux(16), Some(10)); // 9
+        assert_eq!(android_key_to_linux(131), Some(59)); // F1
+        assert_eq!(android_key_to_linux(142), Some(88)); // F12
+        assert_eq!(android_key_to_linux(19), Some(103)); // Up
+        assert_eq!(android_key_to_linux(111), Some(1)); // Escape
+        assert_eq!(android_key_to_linux(59), Some(42)); // Left Shift
+        assert_eq!(android_key_to_linux(60), Some(54)); // Right Shift
+        assert_eq!(android_key_to_linux(55), Some(51)); // Comma
+        assert_eq!(android_key_to_linux(76), Some(53)); // Slash
+        assert_eq!(android_key_to_linux(0), None);
+        assert_eq!(android_key_to_linux(4), None); // Back is system navigation
     }
 
     #[test]
@@ -1960,7 +2250,11 @@ mod tests {
             !tip_up.contains(&(EV_KEY, BTN_TOOL_PEN, 0)),
             "the tool must still be in proximity while the last sample goes out"
         );
-        assert_eq!(f[4], vec![(EV_KEY, BTN_TOOL_PEN, 0)], "proximity out in its own frame");
+        assert_eq!(
+            f[4],
+            vec![(EV_KEY, BTN_TOOL_PEN, 0)],
+            "proximity out in its own frame"
+        );
     }
 
     #[test]
@@ -1971,15 +2265,22 @@ mod tests {
             height: 1752,
             codec: "h264".into(),
             pen_only: false,
+            keyboard: None,
             fps: Some(90),
             bitrate_kbps: Some(30000),
         };
-        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
         assert_eq!(v["fps"], 90);
         assert_eq!(v["bitrate_kbps"], 30000);
         // An older tablet app, or a session without settings, sees no new keys.
-        let without = InputResponse { fps: None, bitrate_kbps: None, ..with };
-        let v: serde_json::Value = serde_json::from_str(&serde_json::to_string(&without).unwrap()).unwrap();
+        let without = InputResponse {
+            fps: None,
+            bitrate_kbps: None,
+            ..with
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&without).unwrap()).unwrap();
         assert!(v.get("fps").is_none() && v.get("bitrate_kbps").is_none());
     }
 
@@ -1994,11 +2295,18 @@ mod tests {
         let f = frames(&path);
         let _ = std::fs::remove_file(&path);
         let pressure = |frame: &Vec<(u16, u16, i32)>| {
-            frame.iter().find(|e| e.0 == EV_ABS && e.1 == ABS_PRESSURE).map(|e| e.2)
+            frame
+                .iter()
+                .find(|e| e.0 == EV_ABS && e.1 == ABS_PRESSURE)
+                .map(|e| e.2)
         };
         assert_eq!(pressure(&f[1]), Some(1), "tip-down frame");
         assert_eq!(pressure(&f[2]), Some(1), "contact move");
-        assert_eq!(pressure(&f[3]), Some(PEN_PRESSURE_MAX), "clamped to the axis range");
+        assert_eq!(
+            pressure(&f[3]),
+            Some(PEN_PRESSURE_MAX),
+            "clamped to the axis range"
+        );
         assert_eq!(pressure(&f[4]), Some(0), "hover stays at zero");
         assert_eq!(pressure(&f[5]), Some(0), "the lift stays at zero");
     }
@@ -2030,8 +2338,14 @@ mod tests {
         let f = frames(&path);
         let _ = std::fs::remove_file(&path);
         assert_eq!(f[0], vec![(EV_REL, REL_WHEEL_HI_RES, 90)]);
-        assert_eq!(f[1], vec![(EV_REL, REL_WHEEL_HI_RES, 90), (EV_REL, REL_WHEEL, 1)]);
-        assert_eq!(f[2], vec![(EV_REL, REL_HWHEEL_HI_RES, -240), (EV_REL, REL_HWHEEL, -2)]);
+        assert_eq!(
+            f[1],
+            vec![(EV_REL, REL_WHEEL_HI_RES, 90), (EV_REL, REL_WHEEL, 1)]
+        );
+        assert_eq!(
+            f[2],
+            vec![(EV_REL, REL_HWHEEL_HI_RES, -240), (EV_REL, REL_HWHEEL, -2)]
+        );
         assert_eq!(rest, (0, 60));
     }
 
@@ -2039,8 +2353,15 @@ mod tests {
     fn touchpad_messages_parse() {
         let rel: InputEvent = serde_json::from_str(r#"{"type":"rel","dx":1.5,"dy":-2}"#).unwrap();
         assert!(matches!(rel, InputEvent::Rel { dx, dy } if dx == 1.5 && dy == -2.0));
-        let b: InputEvent = serde_json::from_str(r#"{"type":"button","button":1,"down":true}"#).unwrap();
-        assert!(matches!(b, InputEvent::Button { button: 1, down: true }));
+        let b: InputEvent =
+            serde_json::from_str(r#"{"type":"button","button":1,"down":true}"#).unwrap();
+        assert!(matches!(
+            b,
+            InputEvent::Button {
+                button: 1,
+                down: true
+            }
+        ));
         let sc: InputEvent = serde_json::from_str(r#"{"type":"scroll","dx":0,"dy":12}"#).unwrap();
         assert!(matches!(sc, InputEvent::Scroll { dy, .. } if dy == 12.0));
     }

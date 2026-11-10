@@ -71,6 +71,10 @@ class Prefs(context: Context) {
         get() = sp.getBoolean("touchpad_mode", false)
         set(v) = sp.edit().putBoolean("touchpad_mode", v).apply()
 
+    var keyboardForwarding: Boolean
+        get() = sp.getBoolean("keyboard_forwarding", true)
+        set(v) = sp.edit().putBoolean("keyboard_forwarding", v).apply()
+
     /**
      * Which way round the tablet is held: [ORIENTATION_AUTO] follows the
      * sensor between the two landscape directions, the other two pin it.

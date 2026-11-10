@@ -74,6 +74,7 @@ def main():
     ap.add_argument("--width", type=int, default=2560)
     ap.add_argument("--height", type=int, default=1600)
     ap.add_argument("--no-token", action="store_true", help="skip auth, to check we get dropped")
+    ap.add_argument("--keys", action="store_true", help="send representative Android key down/up events")
     a = ap.parse_args()
     vport, iport = 8890 + 2 * a.slot, 8891 + 2 * a.slot
     token = None
@@ -94,6 +95,12 @@ def main():
     ws_send(ws, {"type": "resolution", "width": a.width, "height": a.height,
                  "width_mm": 300, "height_mm": 190})
     print(f"reported {a.width}x{a.height}")
+    if a.keys:
+        # Android KeyEvent.KEYCODE_A (29), with matching down/up actions.
+        for action in (0, 1):
+            event = {"type": "key", "code": 29, "action": action, "meta": 0}
+            ws_send(ws, event)
+            print("sent key:", json.dumps(event))
 
     # --- video ---
     v = socket.create_connection(("127.0.0.1", vport), timeout=10)

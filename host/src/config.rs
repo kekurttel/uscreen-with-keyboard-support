@@ -279,15 +279,20 @@ impl FileConfig {
         // Say exactly which lines change. Settings that drift with nobody
         // touching them are impossible to chase down otherwise.
         if let Ok(old) = std::fs::read_to_string(&path) {
-            let before: std::collections::BTreeMap<&str, &str> = old
-                .lines()
-                .filter_map(|l| l.split_once(" = "))
-                .collect();
+            let before: std::collections::BTreeMap<&str, &str> =
+                old.lines().filter_map(|l| l.split_once(" = ")).collect();
             let changed: Vec<String> = text
                 .lines()
                 .filter_map(|l| l.split_once(" = "))
                 .filter(|(k, v)| before.get(k) != Some(v))
-                .map(|(k, v)| format!("{} = {} (was {})", k, v, before.get(k).unwrap_or(&"<unset>")))
+                .map(|(k, v)| {
+                    format!(
+                        "{} = {} (was {})",
+                        k,
+                        v,
+                        before.get(k).unwrap_or(&"<unset>")
+                    )
+                })
                 .collect();
             if !changed.is_empty() {
                 tracing::info!("Config written: {}", changed.join(", "));

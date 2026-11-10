@@ -60,9 +60,7 @@ pub fn make_edid_sized(
 
     // Chromaticity (sRGB). Bytes 25..=34 inclusive — ten of them; the previous
     // nine-byte copy left the last one zeroed.
-    edid[25..35].copy_from_slice(&[
-        0xEE, 0x91, 0xA3, 0x54, 0x4C, 0x99, 0x26, 0x0F, 0x50, 0x54,
-    ]);
+    edid[25..35].copy_from_slice(&[0xEE, 0x91, 0xA3, 0x54, 0x4C, 0x99, 0x26, 0x0F, 0x50, 0x54]);
 
     // No established timings; standard timings unused
     for i in 0..8 {
@@ -135,7 +133,14 @@ pub fn make_edid_sized(
 /// Build an EDID at the default physical size.
 #[cfg(test)]
 pub fn make_edid(width: u32, height: u32, refresh: u32) -> Vec<u8> {
-    make_edid_sized(width, height, refresh, DEFAULT_WIDTH_MM, DEFAULT_HEIGHT_MM, 0)
+    make_edid_sized(
+        width,
+        height,
+        refresh,
+        DEFAULT_WIDTH_MM,
+        DEFAULT_HEIGHT_MM,
+        0,
+    )
 }
 
 /// Bumped whenever the generator changes. It is part of the cache filename so
@@ -187,7 +192,14 @@ pub fn ensure_edid_sized(
 /// Write (or reuse) a generated EDID at the default physical size.
 #[allow(dead_code)]
 pub fn ensure_edid(width: u32, height: u32, refresh: u32) -> Result<PathBuf> {
-    ensure_edid_sized(width, height, refresh, DEFAULT_WIDTH_MM, DEFAULT_HEIGHT_MM, 0)
+    ensure_edid_sized(
+        width,
+        height,
+        refresh,
+        DEFAULT_WIDTH_MM,
+        DEFAULT_HEIGHT_MM,
+        0,
+    )
 }
 
 #[cfg(test)]
@@ -221,9 +233,11 @@ mod tests {
     fn identical_tablet_modes_have_distinct_slot_identities() {
         for instance in 0..3 {
             let edid = make_edid_sized(2560, 1600, 60, 227, 142, instance);
-            assert_eq!(u32::from_le_bytes(edid[12..16].try_into().unwrap()), instance + 1);
+            assert_eq!(
+                u32::from_le_bytes(edid[12..16].try_into().unwrap()),
+                instance + 1
+            );
             assert_eq!(edid.iter().map(|&b| b as u32).sum::<u32>() % 256, 0);
         }
     }
-
 }

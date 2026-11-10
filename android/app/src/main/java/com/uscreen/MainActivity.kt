@@ -1,10 +1,15 @@
 package com.uscreen
 
 import android.content.Intent
+import android.content.Context
+import android.view.inputmethod.InputMethodManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.SurfaceView
+import android.view.KeyEvent
+import android.widget.EditText
+import android.text.InputType
 import android.view.View
 import android.view.WindowInsetsController
 import android.view.WindowManager
@@ -18,6 +23,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -44,11 +51,35 @@ class MainActivity : ComponentActivity() {
     private var touchCapture: TouchCapture? = null
     private lateinit var prefs: Prefs
 
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (!::prefs.isInitialized || !prefs.keyboardForwarding) return super.dispatchKeyEvent(event)
+        when (event.keyCode) {
+            KeyEvent.KEYCODE_VOLUME_UP,
+            KeyEvent.KEYCODE_VOLUME_DOWN,
+            KeyEvent.KEYCODE_VOLUME_MUTE,
+            KeyEvent.KEYCODE_POWER,
+            KeyEvent.KEYCODE_HOME -> return super.dispatchKeyEvent(event)
+        }
+        if (event.keyCode == KeyEvent.KEYCODE_UNKNOWN) return super.dispatchKeyEvent(event)
+        val action = when (event.action) {
+            KeyEvent.ACTION_DOWN -> 0
+            KeyEvent.ACTION_UP -> 1
+            else -> return super.dispatchKeyEvent(event)
+        }
+        // KeyEvents delivered here are sourced from the active input device; do
+        // not filter by SOURCE_KEYBOARD because some Bluetooth keyboards report
+        // a combined keyboard/dpad source.
+        val capture = touchCapture ?: return super.dispatchKeyEvent(event)
+        capture.sendKey(event.keyCode, action, event.metaState)
+        return true
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         // Keep screen on while streaming
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN)
 
         requestHighestRefreshRate()
 
@@ -418,12 +449,26 @@ fun UScreenMain(
     var showSettings by remember { mutableStateOf(false) }
     var showStats by remember { mutableStateOf(prefs?.showStats ?: false) }
     var touchOn by remember { mutableStateOf(prefs?.touchEnabled ?: true) }
+    var keyboardForwarding by remember { mutableStateOf(prefs?.keyboardForwarding ?: true) }
+    var keyboardInput by remember { mutableStateOf<EditText?>(null) }
+    var keyboardVisible by remember { mutableStateOf(false) }
     var touchpadOn by remember { mutableStateOf(prefs?.touchpadMode ?: false) }
     var touchpadSpeedPct by remember { mutableStateOf(prefs?.touchpadSpeed ?: 100) }
     var blankInPenMode by remember { mutableStateOf(prefs?.blankPenOnly ?: true) }
     var orientationChoice by remember { mutableStateOf(prefs?.orientation ?: Prefs.ORIENTATION_AUTO) }
 
     val context = LocalContext.current
+
+    LaunchedEffect(keyboardVisible) {
+        if (keyboardVisible) {
+            withFrameNanos { }
+            keyboardInput?.let { input ->
+                input.requestFocus()
+                (context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+                    .showSoftInput(input, InputMethodManager.SHOW_IMPLICIT)
+            }
+        }
+    }
 
     LaunchedEffect(videoReceiver) {
         videoReceiver?.onConnected = {
@@ -504,21 +549,51 @@ fun UScreenMain(
             ConnectionScreen()
         }
 
-        // Stats chip (top-left, only while streaming)
-        if (isConnected && showStats) {
-            Surface(
-                color = Color(0x99000000),
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(12.dp)
+        // Only attach an IME target while the user has explicitly opened the OSK.
+        if (keyboardVisible) {
+            AndroidView(
+                factory = { ctx ->
+                    EditText(ctx).apply {
+                        inputType = InputType.TYPE_CLASS_TEXT
+                        isSingleLine = true
+                        alpha = 0f
+                        isFocusableInTouchMode = true
+                        setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                        setTextColor(android.graphics.Color.TRANSPARENT)
+                        setHintTextColor(android.graphics.Color.TRANSPARENT)
+                        setPadding(0, 0, 0, 0)
+                    }.also { keyboardInput = it }
+                },
+                modifier = Modifier.align(Alignment.TopStart).size(1.dp)
+            )
+        } else {
+            keyboardInput = null
+        }
+
+        // Stats and the manual OSK control share the top-left corner.
+        if ((isConnected && showStats) || keyboardForwarding) {
+            Row(
+                modifier = Modifier.align(Alignment.TopStart).padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "%.0f fps   %.1f Mbps".format(fps, mbps),
-                    fontSize = 12.sp,
-                    color = Color(0xFFB0B0C0),
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
-                )
+                if (isConnected && showStats) {
+                    Surface(color = Color(0x99000000), shape = RoundedCornerShape(8.dp)) {
+                        Text(
+                            text = "%.0f fps   %.1f Mbps".format(fps, mbps),
+                            fontSize = 12.sp,
+                            color = Color(0xFFB0B0C0),
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                        )
+                    }
+                }
+                if (keyboardForwarding) {
+                    IconButton(
+                        onClick = { keyboardVisible = !keyboardVisible },
+                        modifier = Modifier.size(36.dp).background(Color(0x6620202C), CircleShape)
+                    ) {
+                        Text("⌨", color = Color(0xFFB0B0C0), fontSize = 18.sp)
+                    }
+                }
             }
         }
 
@@ -620,6 +695,11 @@ fun UScreenMain(
                 onShowStatsChange = {
                     showStats = it
                     prefs?.showStats = it
+                },
+                keyboardForwarding = keyboardForwarding,
+                onKeyboardForwardingChange = {
+                    keyboardForwarding = it
+                    prefs?.keyboardForwarding = it
                 },
                 blankPenOnly = blankInPenMode,
                 onBlankPenOnlyChange = {
@@ -786,6 +866,8 @@ private fun SettingsSheet(
     onPenOnlyChange: (Boolean) -> Unit,
     showStats: Boolean,
     onShowStatsChange: (Boolean) -> Unit,
+    keyboardForwarding: Boolean,
+    onKeyboardForwardingChange: (Boolean) -> Unit,
     blankPenOnly: Boolean,
     onBlankPenOnlyChange: (Boolean) -> Unit,
     touchEnabled: Boolean,
@@ -981,6 +1063,26 @@ private fun SettingsSheet(
                 Switch(
                     checked = showStats,
                     onCheckedChange = onShowStatsChange,
+                    colors = SwitchDefaults.colors(checkedTrackColor = Accent)
+                )
+            }
+            Spacer(Modifier.height(20.dp))
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Keyboard forwarding", fontSize = 14.sp, color = Color(0xFFB0B0C0))
+                    Text(
+                        "Enable the keyboard button for manually opening the tablet keyboard",
+                        fontSize = 11.sp,
+                        color = Color(0xFF6A6A7E)
+                    )
+                }
+                Switch(
+                    checked = keyboardForwarding,
+                    onCheckedChange = onKeyboardForwardingChange,
                     colors = SwitchDefaults.colors(checkedTrackColor = Accent)
                 )
             }

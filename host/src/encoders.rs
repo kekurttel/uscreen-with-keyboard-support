@@ -21,7 +21,10 @@ static VAAPI_PICKED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_ne
 /// The render node VAAPI encodes on: the configured or auto-picked one once
 /// `ensure_vaapi_device` has run, `renderD128` before that.
 pub fn vaapi_device() -> String {
-    VAAPI_DEVICE.get().cloned().unwrap_or_else(|| DEFAULT_VAAPI_DEVICE.to_string())
+    VAAPI_DEVICE
+        .get()
+        .cloned()
+        .unwrap_or_else(|| DEFAULT_VAAPI_DEVICE.to_string())
 }
 
 /// The nodes worth trying for VAAPI, from `(number, driver)` pairs, in node
@@ -31,12 +34,17 @@ pub fn vaapi_device() -> String {
 fn order_nodes(mut found: Vec<(u32, String)>) -> Vec<String> {
     found.retain(|(_, driver)| driver != "nvidia");
     found.sort();
-    found.into_iter().map(|(n, _)| format!("/dev/dri/renderD{}", n)).collect()
+    found
+        .into_iter()
+        .map(|(n, _)| format!("/dev/dri/renderD{}", n))
+        .collect()
 }
 
 /// `(number, driver)` of every render node on the machine.
 fn render_drivers() -> Vec<(u32, String)> {
-    let Ok(dir) = std::fs::read_dir("/sys/class/drm") else { return Vec::new() };
+    let Ok(dir) = std::fs::read_dir("/sys/class/drm") else {
+        return Vec::new();
+    };
     dir.flatten()
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
@@ -79,7 +87,10 @@ pub async fn ensure_vaapi_device(configured: &str) {
             for node in render_nodes() {
                 if probe_with("h264_vaapi", Some(&node)).await.is_ok() {
                     if node != DEFAULT_VAAPI_DEVICE {
-                        info!("VAAPI device: {} ({} cannot encode here)", node, DEFAULT_VAAPI_DEVICE);
+                        info!(
+                            "VAAPI device: {} ({} cannot encode here)",
+                            node, DEFAULT_VAAPI_DEVICE
+                        );
                     }
                     let _ = VAAPI_DEVICE.set(node);
                     return;
@@ -115,7 +126,9 @@ pub async fn probe(encoder: &str) -> Result<(), String> {
 
 /// `probe`, on a given VAAPI render node (`None` = the settled one).
 async fn probe_with(encoder: &str, vaapi_device_override: Option<&str>) -> Result<(), String> {
-    let device = vaapi_device_override.map(str::to_string).unwrap_or_else(vaapi_device);
+    let device = vaapi_device_override
+        .map(str::to_string)
+        .unwrap_or_else(vaapi_device);
     let mut args: Vec<String> = [
         "-hide_banner",
         "-loglevel",
@@ -185,7 +198,8 @@ pub async fn has_option(encoder: &str, option: &str) -> bool {
 
 fn help_lists_option(help: &str, option: &str) -> bool {
     let flag = format!("-{}", option);
-    help.lines().any(|line| line.split_whitespace().next() == Some(flag.as_str()))
+    help.lines()
+        .any(|line| line.split_whitespace().next() == Some(flag.as_str()))
 }
 
 pub async fn works(encoder: &str) -> bool {
@@ -197,7 +211,11 @@ pub async fn works(encoder: &str) -> bool {
 /// nothing encodes at all, in which case the caller should say so and stop.
 pub async fn resolve(configured: &str) -> Option<String> {
     // The old gstreamer-style alias.
-    let configured = if configured == "vaapih264enc" { "h264_vaapi" } else { configured };
+    let configured = if configured == "vaapih264enc" {
+        "h264_vaapi"
+    } else {
+        configured
+    };
     let first = match probe(configured).await {
         Ok(()) => return Some(configured.to_string()),
         Err(e) => e,
@@ -205,7 +223,10 @@ pub async fn resolve(configured: &str) -> Option<String> {
     // Once more before overriding what the user chose: at login a hybrid
     // laptop's discrete GPU may still be waking up, or its driver still
     // loading, and replacing the encoder is saved to the config.
-    info!("Encoder {} failed a test frame ({}), trying once more", configured, first);
+    info!(
+        "Encoder {} failed a test frame ({}), trying once more",
+        configured, first
+    );
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     let reason = match probe(configured).await {
         Ok(()) => return Some(configured.to_string()),
@@ -228,7 +249,10 @@ pub async fn resolve(configured: &str) -> Option<String> {
             Some(e.to_string())
         }
         None => {
-            info!("No H.264 encoder works here: tried {}", CANDIDATES.join(", "));
+            info!(
+                "No H.264 encoder works here: tried {}",
+                CANDIDATES.join(", ")
+            );
             None
         }
     }
@@ -253,7 +277,10 @@ mod tests {
             (128, "nvidia".to_string()),
             (130, "amdgpu".to_string()),
         ];
-        assert_eq!(order_nodes(found), ["/dev/dri/renderD129", "/dev/dri/renderD130"]);
+        assert_eq!(
+            order_nodes(found),
+            ["/dev/dri/renderD129", "/dev/dri/renderD130"]
+        );
         assert!(order_nodes(vec![(128, "nvidia".into())]).is_empty());
     }
 

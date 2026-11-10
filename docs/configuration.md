@@ -30,6 +30,12 @@ icon or CLI flags (flags win over the file). Restart the daemon, or press
 | `check_updates` | `true` | | One HTTPS request a day to api.github.com to tell you a newer release exists. Nothing is downloaded or installed. |
 | `video_port`, `input_port` | `8890`, `8891` | | Loopback ports for video and for input/control. Change them only if something else uses these. |
 
+## Keyboard input
+
+Keyboard forwarding is controlled by a persisted toggle in the tablet app's
+settings. It is an app-side preference, not a host `config.toml` setting; there
+is no host configuration key for it.
+
 ## Per-tablet settings
 
 Each tablet is remembered by its adb serial in a `[tablets.<serial>]` block,

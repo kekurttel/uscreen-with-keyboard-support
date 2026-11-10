@@ -27,13 +27,19 @@ fn command_exists(name: &str) -> bool {
 /// A GNOME Wayland session with the two tools this needs. On GNOME's X11
 /// session `x11.rs` does the mapping instead.
 pub fn active() -> bool {
-    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default().to_uppercase();
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP")
+        .unwrap_or_default()
+        .to_uppercase();
     let wayland = std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t == "wayland");
     desktop.contains("GNOME") && wayland && command_exists("gsettings") && command_exists("busctl")
 }
 
 async fn output_of(program: &str, args: &[&str]) -> Option<String> {
-    let out = tokio::process::Command::new(program).args(args).output().await.ok()?;
+    let out = tokio::process::Command::new(program)
+        .args(args)
+        .output()
+        .await
+        .ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
@@ -54,7 +60,11 @@ fn parse_monitors(json: &str) -> Option<Vec<[String; 4]>> {
 }
 
 async fn monitors() -> Option<Vec<[String; 4]>> {
-    monitors_from("org.gnome.Mutter.DisplayConfig", "/org/gnome/Mutter/DisplayConfig").await
+    monitors_from(
+        "org.gnome.Mutter.DisplayConfig",
+        "/org/gnome/Mutter/DisplayConfig",
+    )
+    .await
 }
 
 async fn monitors_from(service: &str, path: &str) -> Option<Vec<[String; 4]>> {
@@ -110,7 +120,10 @@ fn triple_text(ids: Option<[&str; 3]>) -> String {
 
 /// Write `output` and read it back; a write that did not stick is not done.
 async fn set_output(schema_path: &str, text: &str) -> bool {
-    if output_of("gsettings", &["set", schema_path, "output", text]).await.is_none() {
+    if output_of("gsettings", &["set", schema_path, "output", text])
+        .await
+        .is_none()
+    {
         warn!("gsettings refused {} output {}", schema_path, text);
         return false;
     }
@@ -118,7 +131,10 @@ async fn set_output(schema_path: &str, text: &str) -> bool {
     match output_of("gsettings", &["get", schema_path, "output"]).await {
         Some(now) if squash(&now) == squash(text) => true,
         now => {
-            warn!("{} output reads back as {:?}, wanted {}", schema_path, now, text);
+            warn!(
+                "{} output reads back as {:?}, wanted {}",
+                schema_path, now, text
+            );
             false
         }
     }
@@ -132,9 +148,19 @@ fn unique_monitor<'a>(monitors: &'a [[String; 4]], connector: &str) -> Option<&'
 /// Muffin can overwrite a direct XInput transform with its automatic guess.
 /// Give Cinnamon the explicit per-device EDID triple as well. Pen-only mode
 /// clears it before the X11 path maps onto the physical primary output.
-pub async fn map_cinnamon_devices(vendor: u16, touch_product: u16, pen_product: u16, output: Option<&str>) -> bool {
+pub async fn map_cinnamon_devices(
+    vendor: u16,
+    touch_product: u16,
+    pen_product: u16,
+    output: Option<&str>,
+) -> bool {
     let text = if let Some(output) = output {
-        let Some(monitors) = monitors_from("org.cinnamon.Muffin.DisplayConfig", "/org/cinnamon/Muffin/DisplayConfig").await else {
+        let Some(monitors) = monitors_from(
+            "org.cinnamon.Muffin.DisplayConfig",
+            "/org/cinnamon/Muffin/DisplayConfig",
+        )
+        .await
+        else {
             warn!("Cinnamon did not report its monitor identities");
             return false;
         };
@@ -143,7 +169,9 @@ pub async fn map_cinnamon_devices(vendor: u16, touch_product: u16, pen_product: 
             return false;
         };
         triple_text(Some([&m[1], &m[2], &m[3]]))
-    } else { triple_text(None) };
+    } else {
+        triple_text(None)
+    };
     let pen = desktop_schema_with_path("cinnamon", Kind::Tablet, vendor, pen_product);
     let touch = desktop_schema_with_path("cinnamon", Kind::Touchscreen, vendor, touch_product);
     let pen_ok = set_output(&pen, &text).await;
@@ -168,7 +196,9 @@ pub async fn map_devices(
             if attempt > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
-            let Some(list) = monitors().await else { continue };
+            let Some(list) = monitors().await else {
+                continue;
+            };
             target = list.into_iter().find(|m| connectors.contains(&m[0]));
             if target.is_some() {
                 break;
@@ -184,11 +214,17 @@ pub async fn map_devices(
         None => triple_text(None),
     };
     let tablet = set_output(&schema_with_path(Kind::Tablet, vendor, pen_product), &text).await;
-    let touch = set_output(&schema_with_path(Kind::Touchscreen, vendor, touch_product), &text).await;
+    let touch = set_output(
+        &schema_with_path(Kind::Touchscreen, vendor, touch_product),
+        &text,
+    )
+    .await;
     match (&target, tablet && touch) {
         (Some(m), true) => info!("Mapped pen and touch to {} ({})", m[0], text),
         (None, true) => info!("Cleared the pen and touch mapping"),
-        _ => warn!("GNOME did not take the pen/touch mapping — assign it in Settings → Wacom Tablet"),
+        _ => {
+            warn!("GNOME did not take the pen/touch mapping — assign it in Settings → Wacom Tablet")
+        }
     }
     target.map(|m| m[0].clone())
 }
@@ -218,8 +254,12 @@ mod tests {
             schema_with_path(Kind::Tablet, 0x4553, 0x0002),
             "org.gnome.desktop.peripherals.tablet:/org/gnome/desktop/peripherals/tablets/4553:0002/"
         );
-        assert!(schema_with_path(Kind::Touchscreen, 0x4553, 0x0001).ends_with("/touchscreens/4553:0001/"));
-        assert_eq!(triple_text(Some(["USC", "UScreen", "1"])), "['USC', 'UScreen', '1']");
+        assert!(schema_with_path(Kind::Touchscreen, 0x4553, 0x0001)
+            .ends_with("/touchscreens/4553:0001/"));
+        assert_eq!(
+            triple_text(Some(["USC", "UScreen", "1"])),
+            "['USC', 'UScreen', '1']"
+        );
         assert_eq!(triple_text(Some(["A'B", "x", "y"])), "['A\\'B', 'x', 'y']");
         assert_eq!(triple_text(None), "['', '', '']");
         assert_eq!(desktop_schema_with_path("cinnamon", Kind::Touchscreen, 0x4553, 0x11),

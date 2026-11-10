@@ -98,7 +98,10 @@ mod tests {
     fn returns_a_frame_as_soon_as_its_chunk_is_complete() {
         let mut avi = AviDemuxer::default();
         assert!(avi.push(&header()).unwrap().is_empty());
-        assert_eq!(avi.push(&chunk(b"00dc", b"frame")).unwrap(), [b"frame".to_vec()]);
+        assert_eq!(
+            avi.push(&chunk(b"00dc", b"frame")).unwrap(),
+            [b"frame".to_vec()]
+        );
     }
 
     #[test]
@@ -127,7 +130,10 @@ mod tests {
         let mut data = header();
         data.extend(chunk(b"00dc", b"odd"));
         data.extend(chunk(b"00dc", b"even"));
-        assert_eq!(avi.push(&data).unwrap(), [b"odd".to_vec(), b"even".to_vec()]);
+        assert_eq!(
+            avi.push(&data).unwrap(),
+            [b"odd".to_vec(), b"even".to_vec()]
+        );
     }
 
     #[test]
